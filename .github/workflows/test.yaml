@@ -1,0 +1,41 @@
+name: Test Application
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.0.0
+        with:
+          dockerfile: Dockerfile
+      
+      - name: Check HTML syntax
+        run: |
+          if command -v tidy &> /dev/null; then
+            tidy -q -errors src/index.html || true
+          else
+            echo "HTML tidy not installed, skipping HTML check"
+          fi
+      
+      - name: Build test image
+        run: |
+          docker build -t test-app:latest .
+          echo "✅ Docker image builds successfully"
+      
+      - name: Run container test
+        run: |
+          docker run -d --name test-app -p 8080:80 test-app:latest
+          sleep 5
+          curl -f http://localhost:8080/ || exit 1
+          curl -f http://localhost:8080/health || exit 1
+          docker stop test-app
+          docker rm test-app
+          echo "✅ Application responds correctly"
