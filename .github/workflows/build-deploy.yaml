@@ -25,9 +25,10 @@ jobs:
       
       - name: Login to Yandex Container Registry
         run: |
-          echo "${{ secrets.YC_SA_KEY }}" > /tmp/sa-key.json
-          yc config set service-account-key /tmp/sa-key.json
-          yc container registry configure-docker
+          echo "${{ secrets.YC_SA_KEY }}" | docker login \
+            --username 'json_key' \
+            --password-stdin \
+            cr.yandex
       
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
@@ -50,7 +51,6 @@ jobs:
   deploy:
     name: Deploy to Kubernetes
     needs: build
-    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     
     steps:
@@ -59,8 +59,6 @@ jobs:
       
       - name: Configure kubectl
         uses: azure/setup-kubectl@v3
-        with:
-          version: 'v1.28.0'
       
       - name: Set up kubeconfig
         run: |
@@ -68,42 +66,56 @@ jobs:
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
           chmod 600 $HOME/.kube/config
       
-      - name: Create namespace if not exists
+      - name: Verify cluster access
         run: |
-          kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+          kubectl cluster-info
+          kubectl get nodes
       
-      - name: Apply Kubernetes manifests
+      - name: Check if deployment exists
+        id: check-deployment
         run: |
-          export KUBECONFIG=$HOME/.kube/config
+          if kubectl get deployment diploma-app -n ${{ env.K8S_NAMESPACE }} &>/dev/null; then
+            echo "deployment_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "deployment_exists=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Create/Update deployment
+        run: |
+          # Создаем или обновляем деплоймент
+          kubectl create deployment diploma-app \
+            --image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --port=80 \
+            --replicas=2 \
+            --namespace=${{ env.K8S_NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
           
-          # Применяем манифесты
-          kubectl apply -f manifests/deployment.yaml -n ${{ env.K8S_NAMESPACE }}
-          kubectl apply -f manifests/service.yaml -n ${{ env.K8S_NAMESPACE }}
-          
-          echo "✅ Kubernetes manifests applied"
+          # Создаем сервис если его нет
+          kubectl expose deployment diploma-app \
+            --port=80 \
+            --target-port=80 \
+            --type=ClusterIP \
+            --namespace=${{ env.K8S_NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
       
       - name: Update image in deployment
         run: |
-          export KUBECONFIG=$HOME/.kube/config
-          
-          # Обновляем образ
+          # Обновляем образ в существующем деплойменте
           kubectl set image deployment/diploma-app \
-            diploma-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.release.tag_name }} \
+            diploma-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
             -n ${{ env.K8S_NAMESPACE }} \
             --record
-          
-          # Ждем rollout
+      
+      - name: Wait for rollout
+        run: |
           kubectl rollout status deployment/diploma-app \
             -n ${{ env.K8S_NAMESPACE }} \
             --timeout=300s
-          
-          echo "✅ Application deployed successfully!"
       
       - name: Verify deployment
         run: |
-          export KUBECONFIG=$HOME/.kube/config
           echo "=== Pods ==="
-          kubectl get pods -l app=diploma-app -n ${{ env.K8S_NAMESPACE }}
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=diploma-app
           echo "=== Service ==="
           kubectl get svc diploma-app -n ${{ env.K8S_NAMESPACE }}
           echo "=== Deployment ==="
