@@ -1,65 +1,17 @@
-name: Simple Build and Deploy
+name: Build and Deploy to Kubernetes
 
 on:
   push:
     branches: [ main ]
 
+env:
+  REGISTRY: cr.yandex/crplsrum4vurc408russ
+  IMAGE_NAME: diploma-app
+
 jobs:
-  test-auth:
-    name: Test Authentication
+  build-and-push:
+    name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Debug - Show secret info
-        run: |
-          echo "Checking secrets..."
-          echo "YC_SA_KEY length: ${#YC_SA_KEY}"
-          echo "KUBE_CONFIG length: ${#KUBE_CONFIG}"
-      
-      - name: Test Yandex Cloud Auth
-        run: |
-          # Создаем файл с ключом
-          cat << 'JSON_KEY' > /tmp/sa-key.json
-          ${{ secrets.YC_SA_KEY }}
-          JSON_KEY
-          
-          # Проверяем файл
-          echo "=== File content (first 200 chars) ==="
-          head -c 200 /tmp/sa-key.json
-          echo ""
-          echo "=== File info ==="
-          ls -la /tmp/sa-key.json
-          file /tmp/sa-key.json
-          
-          # Проверяем JSON валидность
-          if jq . /tmp/sa-key.json > /dev/null 2>&1; then
-            echo "✅ JSON is valid"
-          else
-            echo "❌ JSON is INVALID"
-            echo "Actual content:"
-            cat /tmp/sa-key.json
-          fi
-      
-      - name: Test Kubernetes Auth
-        run: |
-          # Создаем kubeconfig
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
-          
-          # Проверяем
-          if kubectl cluster-info 2>/dev/null; then
-            echo "✅ Kubeconfig is valid"
-          else
-            echo "❌ Kubeconfig is INVALID"
-          fi
-  
-  build:
-    name: Build Docker Image
-    runs-on: ubuntu-latest
-    needs: test-auth
     
     steps:
       - name: Checkout code
@@ -68,55 +20,63 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v2
       
-      - name: Login to Yandex Container Registry
+      - name: Install Yandex Cloud CLI
         run: |
-          # Метод 1: Используем yc CLI
-          echo "=== Method 1: Using yc CLI ==="
+          # Устанавливаем yc в домашнюю директорию
+          curl -s https://storage.yandexcloud.net/yandexcloud-yc/install.sh | \
+            bash -s -- -i $HOME/yc-install -n
           
-          # Устанавливаем yc
-          curl -s https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i /usr/local -n
+          export PATH="$HOME/yc-install/bin:$PATH"
+          yc --version
+      
+      - name: Configure Yandex Cloud Auth
+        run: |
+          export PATH="$HOME/yc-install/bin:$PATH"
           
-          # Создаем файл с ключом
-          cat << 'YC_KEY' > /tmp/yc-key.json
-          ${{ secrets.YC_SA_KEY }}
-          YC_KEY
+          # Создаем файл с ключом из секрета
+          echo '${{ secrets.YC_SA_KEY }}' > $HOME/sa-key.json
           
           # Настраиваем yc
-          yc config set service-account-key /tmp/yc-key.json
+          yc config set service-account-key $HOME/sa-key.json
           yc config set cloud-id b1gm0hnoge59gnkmh3dl
           yc config set folder-id b1gm0hnoge59gnkmh3dl
           
-          # Настраиваем docker
+          # Настраиваем docker для Yandex Container Registry
           yc container registry configure-docker
           
-          # Проверяем
-          echo "✅ Docker configured for Yandex Cloud"
+          echo "✅ Authentication configured"
       
-      - name: Build and Push Image
+      - name: Build and Push Docker Image
         run: |
-          # Простая сборка и пуш
-          REGISTRY="cr.yandex/crplsrum4vurc408russ"
-          IMAGE_NAME="diploma-app"
+          export PATH="$HOME/yc-install/bin:$PATH"
           
-          docker build -t $REGISTRY/$IMAGE_NAME:test-${{ github.sha }} .
-          docker push $REGISTRY/$IMAGE_NAME:test-${{ github.sha }}
+          # Сборка и пуш
+          docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} .
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           
-          echo "✅ Image pushed successfully"
+          # Также пушим latest
+          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          
+          echo "✅ Image pushed: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
   
   deploy:
     name: Deploy to Kubernetes
+    needs: build-and-push
     runs-on: ubuntu-latest
-    needs: build
     
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
       
       - name: Configure kubeconfig
         run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
-          chmod 600 ~/.kube/config
+          mkdir -p $HOME/.kube
+          echo '${{ secrets.KUBE_CONFIG }}' | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
           
           # Тестируем подключение
           kubectl cluster-info
@@ -124,12 +84,23 @@ jobs:
       
       - name: Deploy Application
         run: |
-          # Обновляем образ
+          # Обновляем образ в deployment
           kubectl set image deployment/diploma-app \
-            diploma-app=cr.yandex/crplsrum4vurc408russ/diploma-app:test-${{ github.sha }} \
-            -n default
-            
-          # Ждем обновления
+            diploma-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            -n default \
+            --record
+      
+      - name: Wait for rollout
+        run: |
           kubectl rollout status deployment/diploma-app -n default --timeout=300s
-          
-          echo "✅ Application deployed successfully"
+      
+      - name: Verify deployment
+        run: |
+          echo "=== Deployment Status ==="
+          kubectl get deployment diploma-app -n default
+          echo ""
+          echo "=== Pods Status ==="
+          kubectl get pods -n default -l app=diploma-app
+          echo ""
+          echo "=== Service Status ==="
+          kubectl get svc diploma-app -n default
