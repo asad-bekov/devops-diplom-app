@@ -1,101 +1,25 @@
-name: Build and Deploy to Kubernetes
-
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  release:
-    types: [created]
-
-env:
-  REGISTRY: cr.yandex/crplsrum4vurc408russ
-  IMAGE_NAME: diploma-app
-  K8S_NAMESPACE: default
-
-jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
-
-    - name: Configure Docker for Yandex Container Registry
-      run: |
-        # Создаем конфиг Docker для YC Registry
-        echo '${{ secrets.YC_SA_KEY }}' > /tmp/sa_key.json
-        cat /tmp/sa_key.json | docker login \
-          --username json_key \
-          --password-stdin \
-          cr.yandex
+- name: Login to Yandex Container Registry
+  run: |
+    echo "=== Method: Using yc CLI ==="
     
-    - name: Build Docker image
-      run: |
-        # Билдим образ с правильным тегом
-        IMAGE_TAG="${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA:0:8}"
-        docker build -t $IMAGE_TAG .
-        
-        # Также тегируем как latest для основной ветки
-        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-          docker tag $IMAGE_TAG ${REGISTRY}/${IMAGE_NAME}:latest
-        fi
+    # Устанавливаем yc в /tmp вместо /usr/local
+    curl -s https://storage.yandexcloud.net/yandexcloud-yc/install.sh | \
+      bash -s -- -i /tmp/yc-install -n
     
-    - name: Push Docker image
-      run: |
-        # Пушим основной тег
-        docker push ${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA:0:8}
-        
-        # Пушим latest если это main ветка
-        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-          docker push ${REGISTRY}/${IMAGE_NAME}:latest
-        fi
-        
-        echo "Image pushed successfully!"
-        echo "Tags: ${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA:0:8}"
-        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-          echo "Also pushed as: ${REGISTRY}/${IMAGE_NAME}:latest"
-        fi
-
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Добавляем в PATH
+    export PATH="/tmp/yc-install/bin:$PATH"
     
-    steps:
-    - name: Checkout Kubernetes manifests
-      uses: actions/checkout@v3
-      with:
-        repository: asaddevops/devops-diplom-k8s
-        token: ${{ secrets.GITHUB_TOKEN }}
-        path: manifests
+    # Создаем файл с ключом
+    cat << 'YC_KEY' > /tmp/yc-key.json
+    ${{ secrets.YC_SA_KEY }}
+    YC_KEY
     
-    - name: Set up kubectl
-      uses: azure/setup-kubectl@v3
-      with:
-        version: 'latest'
+    # Настраиваем yc
+    yc config set service-account-key /tmp/yc-key.json
+    yc config set cloud-id b1gm0hnoge59gnkmh3dl
+    yc config set folder-id b1gm0hnoge59gnkmh3dl
     
-    - name: Configure Kubernetes access
-      run: |
-        mkdir -p $HOME/.kube
-        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
-        chmod 600 $HOME/.kube/config
-        kubectl cluster-info
+    # Настраиваем docker
+    yc container registry configure-docker
     
-    - name: Update deployment image
-      run: |
-        cd manifests
-        kubectl set image deployment/diploma-app \
-          diploma-app=${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA:0:8} \
-          --namespace=${K8S_NAMESPACE}
-        
-        # Проверяем обновление
-        kubectl rollout status deployment/diploma-app \
-          --namespace=${K8S_NAMESPACE} \
-          --timeout=300s
+    echo "✅ Docker configured for Yandex Cloud"
