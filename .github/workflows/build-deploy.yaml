@@ -1,4 +1,4 @@
-name: Final CI/CD Pipeline
+name: Production CI/CD Pipeline
 
 on:
   push:
@@ -7,12 +7,41 @@ on:
 env:
   REGISTRY: cr.yandex/crplsrum4vurc408russ
   IMAGE_NAME: diploma-app
-  K8S_NAMESPACE: default
 
 jobs:
-  build:
-    name: Build and Push
+  verify-secrets:
+    name: Verify Secrets Format
     runs-on: ubuntu-latest
+    
+    steps:
+      - name: Check YC_SA_KEY format
+        run: |
+          echo "=== Verifying YC_SA_KEY ==="
+          # Простая проверка что это JSON
+          if echo "${{ secrets.YC_SA_KEY }}" | jq empty > /dev/null 2>&1; then
+            echo "✅ YC_SA_KEY is valid JSON"
+            echo "Key ID: $(echo '${{ secrets.YC_SA_KEY }}' | jq -r '.id')"
+          else
+            echo "❌ YC_SA_KEY is NOT valid JSON"
+            echo "First 100 chars:"
+            echo "${{ secrets.YC_SA_KEY }}" | head -c 100
+            exit 1
+          fi
+      
+      - name: Check KUBE_CONFIG format
+        run: |
+          echo "=== Verifying KUBE_CONFIG ==="
+          if echo "${{ secrets.KUBE_CONFIG }}" | base64 -d | grep -q "apiVersion:"; then
+            echo "✅ KUBE_CONFIG is valid"
+          else
+            echo "❌ KUBE_CONFIG is invalid"
+            exit 1
+          fi
+  
+  build:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: verify-secrets
     
     steps:
       - name: Checkout code
@@ -21,20 +50,50 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v2
       
-      - name: Login to Yandex Container Registry
+      - name: Install Yandex Cloud CLI
         run: |
-          echo "${{ secrets.YC_SA_KEY }}" > /tmp/sa-key.json
+          # Устанавливаем yc
+          curl -s https://storage.yandexcloud.net/yandexcloud-yc/install.sh | \
+            bash -s -- -i /tmp/yc -n
+          export PATH="/tmp/yc/bin:$PATH"
+          yc --version
+      
+      - name: Configure Yandex Cloud Authentication
+        run: |
+          export PATH="/tmp/yc/bin:$PATH"
+          
+          # Создаем файл с ключом
+          echo '${{ secrets.YC_SA_KEY }}' > /tmp/sa-key.json
+          
+          # Проверяем JSON
+          if ! jq . /tmp/sa-key.json > /dev/null 2>&1; then
+            echo "❌ ERROR: Invalid JSON in YC_SA_KEY"
+            exit 1
+          fi
+          
+          # Настраиваем yc
           yc config set service-account-key /tmp/sa-key.json
           yc config set cloud-id b1gm0hnoge59gnkmh3dl
           yc config set folder-id b1gm0hnoge59gnkmh3dl
+          
+          # Настраиваем docker
           yc container registry configure-docker
+          
+          echo "✅ Yandex Cloud authentication configured"
       
-      - name: Build and Push Docker Image
+      - name: Build and Push Image
         run: |
+          export PATH="/tmp/yc/bin:$PATH"
+          
+          # Сборка и пуш
           docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} .
           docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          
+          # Также пушим latest
           docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          
+          echo "✅ Image pushed: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
   
   deploy:
     name: Deploy to Kubernetes
@@ -42,29 +101,49 @@ jobs:
     needs: build
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
       
       - name: Configure kubeconfig
         run: |
           mkdir -p ~/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          echo '${{ secrets.KUBE_CONFIG }}' | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
+          
+          # Проверяем доступ
+          kubectl cluster-info
+          kubectl get nodes
       
       - name: Deploy Application
         run: |
-          # Update deployment
+          # Обновляем deployment
           kubectl set image deployment/diploma-app \
             nginx=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
-            -n ${{ env.K8S_NAMESPACE }}
+            -n default \
+            --record
       
-      - name: Verify deployment
+      - name: Wait for rollout
         run: |
-          kubectl rollout status deployment/diploma-app -n ${{ env.K8S_NAMESPACE }}
+          kubectl rollout status deployment/diploma-app -n default --timeout=300s
+      
+      - name: Verify Deployment
+        run: |
+          echo "=== Deployment Status ==="
+          kubectl get deployment diploma-app -n default
+          
+          echo ""
+          echo "=== Pods Status ==="
+          kubectl get pods -n default -l app=diploma-app
+          
+          echo ""
+          echo "=== Service Status ==="
+          kubectl get svc diploma-app -n default
+          
+          echo ""
           echo "✅ Application deployed successfully!"
-          echo "Access URLs:"
-          echo "- http://178.154.230.79:30080"
-          echo "- http://158.160.79.246:30080"
+          echo ""
+          echo "=== Access URLs ==="
+          echo "Primary: http://178.154.230.79:30080"
+          echo "Secondary: http://158.160.79.246:30080"
+          echo "Health check: http://178.154.230.79:30080/health"
+          echo "Nginx metrics: http://178.154.230.79:30080/nginx_status"
