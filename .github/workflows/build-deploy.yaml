@@ -1,160 +1,52 @@
-name: DEBUG - Validate YC Secret
+name: FINAL Test - YC Secret
 
 on:
   workflow_dispatch:
 
 jobs:
-  debug-secret:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Save and Inspect Secret (RAW)
-        id: inspect_raw
+      - name: Test YC_SA_KEY format
         run: |
-          echo "=== 1. RAW SECRET DUMP (for debugging) ==="
-          # ВАЖНО: Не выводим весь секрет в лог для безопасности, но сохраняем в файл
-          echo "${{ secrets.YC_SA_KEY }}" > /tmp/secret.raw.txt
+          echo "=== Тестирование секрета ==="
+          # Создаем файл с секретом
+          echo "${{ secrets.YC_SA_KEY }}" > /tmp/test-secret.json
           
-          echo "File size in bytes: $(wc -c < /tmp/secret.raw.txt)"
-          echo "First 300 chars (visible):"
-          head -c 300 /tmp/secret.raw.txt | cat -A
-          echo ""
-          echo "Last 300 chars (visible):"
-          tail -c 300 /tmp/secret.raw.txt | cat -A
-          echo ""
-          
-          echo "=== 2. CHECK FOR COMMON ISSUES ==="
-          # Проверка 1: Начинается ли с {
-          if head -c 1 /tmp/secret.raw.txt | grep -q '{'; then
-            echo "✅ PASS: Secret starts with '{'"
+          # Проверяем JSON
+          if python3 -c "import json; json.load(open('/tmp/test-secret.json'))"; then
+            echo "✅ Секрет - валидный JSON"
           else
-            echo "❌ FAIL: Secret does NOT start with '{'. It starts with: '$(head -c 1 /tmp/secret.raw.txt)'"
+            echo "❌ Секрет - НЕ валидный JSON"
+            echo "Первые 100 символов:"
+            head -c 100 /tmp/test-secret.json
+            echo ""
+            exit 1
           fi
           
-          # Проверка 2: Заканчивается ли на }
-          if tail -c 2 /tmp/secret.raw.txt | tr -d '\n' | grep -q '}'; then
-            echo "✅ PASS: Secret ends with '}'"
-          else
-            echo "❌ FAIL: Secret does NOT end with '}'. It ends with: '$(tail -c 2 /tmp/secret.raw.txt)'"
-          fi
-          
-          # Проверка 3: Есть ли лишние символы в начале (например, `***`)
-          if head -c 10 /tmp/secret.raw.txt | grep -q '^\*\*\*'; then
-            echo "⚠️  WARNING: Secret might start with GitHub's mask '***'"
-          fi
-
-      - name: Validate as JSON
-        id: validate_json
+      - name: Test Yandex Cloud auth
         run: |
-          echo "=== 3. ATTEMPT TO PARSE AS JSON ==="
-          # Копируем raw файл для обработки
-          cp /tmp/secret.raw.txt /tmp/secret_to_parse.json
+          echo "=== Тест аутентификации ==="
+          echo "${{ secrets.YC_SA_KEY }}" > /tmp/auth-key.json
           
-          # Удаляем возможные невидимые символы в начале/конце (BOM, пробелы)
-          # Используем Python для надежной обработки
-          python3 << 'PYEOF'
-import json, sys, os
-with open('/tmp/secret.raw.txt', 'r') as f:
-    content = f.read().strip()
-    
-print(f"Secret length after strip: {len(content)}")
-print(f"First 5 chars (repr): {repr(content[:5])}")
-print(f"Last 5 chars (repr): {repr(content[-5:])}")
-
-try:
-    parsed = json.loads(content)
-    print("✅ SUCCESS: Secret is VALID JSON!")
-    print(f"JSON keys found: {list(parsed.keys())}")
-    
-    # Проверяем наличие критических полей
-    critical_fields = ['id', 'service_account_id', 'private_key']
-    for field in critical_fields:
-        if field in parsed:
-            print(f"   ✅ Field '{field}' exists")
-        else:
-            print(f"   ❌ Field '{field}' is MISSING!")
-            
-    # Проверяем формат приватного ключа
-    if 'private_key' in parsed:
-        priv = parsed['private_key']
-        if '-----BEGIN PRIVATE KEY-----' in priv:
-            print("   ✅ Private key has correct BEGIN marker")
-        else:
-            print("   ❌ Private key MISSING BEGIN marker!")
-            
-except json.JSONDecodeError as e:
-    print(f"❌ FAILED: Secret is NOT valid JSON.")
-    print(f"   Error: {e.msg} at line {e.lineno}, column {e.colno}")
-    # Показываем проблемный контекст
-    lines = content.split('\n')
-    problem_line = max(0, e.lineno - 1)
-    start = max(0, problem_line - 2)
-    end = min(len(lines), problem_line + 3)
-    print(f"   Context around line {e.lineno}:")
-    for i in range(start, end):
-        prefix = '>>>' if i == problem_line else '   '
-        print(f"   {prefix} {i+1}: {lines[i]}")
-PYEOF
-
-      - name: Test with yc CLI (if JSON is valid)
-        id: test_yc
-        # Этот шаг выполнится, только если validate_json завершился успешно (exit code 0)
-        if: steps.validate_json.outcome == 'success'
-        run: |
-          echo "=== 4. TESTING WITH YC CLI ==="
           # Устанавливаем yc
           curl -s https://storage.yandexcloud.net/yandexcloud-yc/install.sh | \
-            bash -s -- -i /tmp/yc-install-dir -n
-          export PATH="/tmp/yc-install-dir/bin:$PATH"
+            bash -s -- -i /tmp/yc -n
+          export PATH="/tmp/yc/bin:$PATH"
           
-          # Используем Python для надежного создания JSON файла
-          python3 << 'PYEOF'
-import json, os, subprocess, sys
-with open('/tmp/secret.raw.txt', 'r') as f:
-    secret_content = f.read().strip()
-secret_data = json.loads(secret_content)
-
-# Сохраняем ключ во временный файл
-with open('/tmp/sa-key-for-yc.json', 'w') as f:
-    json.dump(secret_data, f)
-print("✅ Service account key saved to file")
-PYEOF
-          
-          # Пробуем настроить yc
-          echo "Setting up yc configuration..."
-          if yc config set service-account-key /tmp/sa-key-for-yc.json && \
+          # Конфигурируем
+          if yc config set service-account-key /tmp/auth-key.json && \
              yc config set cloud-id b1gm0hnoge59gnkmh3dl && \
              yc config set folder-id b1gm0hnoge59gnkmh3dl; then
-            echo "✅ yc configured successfully"
+            echo "✅ Конфигурация успешна"
             
-            # Пробуем выполнить простую команду
-            echo "Testing API access..."
+            # Тестируем команду
             if yc iam service-account get aje5tkmdv1edog0g029j --format short 2>&1 | grep -q "aje5tkmdv1edog0g029j"; then
-              echo "🎉 SUCCESS! Authentication works perfectly!"
+              echo "🎉 УСПЕХ! Аутентификация работает!"
             else
-              echo "❌ API call failed. Command output:"
+              echo "❌ Ошибка выполнения команды"
               yc iam service-account get aje5tkmdv1edog0g029j --format short
             fi
           else
-            echo "❌ Failed to configure yc"
+            echo "❌ Ошибка конфигурации"
           fi
-
-      - name: Final Instructions
-        if: failure()
-        run: |
-          echo "=== 🛠️  TROUBLESHOOTING INSTRUCTIONS ==="
-          echo ""
-          echo "If validation failed, here's what to do:"
-          echo "1. Go to GitHub → Repository Settings → Secrets → Actions → YC_SA_KEY"
-          echo "2. Click 'Update'"
-          echo "3. DELETE ALL existing content"
-          echo "4. Get a FRESH key using this exact command on your server:"
-          echo "   yc iam key create --service-account-id aje5tkmdv1edog0g029j --output /tmp/new-key.json"
-          echo "5. Copy the ENTIRE content of /tmp/new-key.json"
-          echo "6. Paste it into the GitHub secret field"
-          echo "7. Make sure it's ONE LINE if possible (no extra spaces at start/end)"
-          echo "8. Click Save"
-          echo ""
-          echo "Then run this workflow again."
