@@ -1,70 +1,63 @@
-name: TEST Secret Only
+name: Validate Secrets and Test YC Access
 
 on:
-  workflow_dispatch:  # Только ручной запуск
+  workflow_dispatch:  # Запуск только вручную
 
 jobs:
-  test-secret:
-    name: Test YC_SA_KEY Format
+  validate-secrets:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Save secret to file
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Debug YC_SA_KEY
         run: |
-          echo "=== Step 1: Saving secret to file ==="
-          echo "${{ secrets.YC_SA_KEY }}" > /tmp/secret-content.txt
-          echo "File size: $(wc -c < /tmp/secret-content.txt) bytes"
-          echo "Line count: $(wc -l < /tmp/secret-content.txt) lines"
-      
-      - name: Show EXACT content
-        run: |
-          echo "=== Step 2: EXACT content (with visible characters) ==="
-          echo "First 200 characters:"
-          head -c 200 /tmp/secret-content.txt
-          echo ""
-          echo ""
-          echo "Last 200 characters:"
-          tail -c 200 /tmp/secret-content.txt
-          echo ""
-      
-      - name: Test as JSON
-        run: |
-          echo "=== Step 3: Testing as JSON ==="
+          echo "=== Проверка формата YC_SA_KEY ==="
+          # Сохраняем секрет во временный файл
+          echo "${{ secrets.YC_SA_KEY }}" > /tmp/yc_key.json
+          echo "Размер файла: $(wc -c < /tmp/yc_key.json) байт"
           
-          # Способ 1: Python
-          if python3 -c "import json, sys; json.load(open('/tmp/secret-content.txt')); print('✅ Python: VALID JSON')" 2>/dev/null; then
-            echo "Python: VALID JSON"
+          # Пробуем прочитать как JSON
+          if jq . /tmp/yc_key.json > /dev/null 2>&1; then
+            echo "✅ Секрет YC_SA_KEY - валидный JSON"
+            echo "Содержит поля:"
+            jq 'keys' /tmp/yc_key.json
           else
-            echo "❌ Python: INVALID JSON"
-            python3 -c "import json, sys; json.load(open('/tmp/secret-content.txt'))" 2>&1 | head -5
+            echo "❌ Секрет YC_SA_KEY - НЕ валидный JSON"
+            echo "Первые 200 символов:"
+            head -c 200 /tmp/yc_key.json
+            echo ""
           fi
           
-          # Способ 2: jq
-          if jq . /tmp/secret-content.txt > /tmp/parsed.json 2>/dev/null; then
-            echo "✅ jq: VALID JSON"
-            echo "JSON structure:"
-            jq 'keys' /tmp/secret-content.txt
+          # Проверяем наличие приватного ключа
+          if grep -q "BEGIN PRIVATE KEY" /tmp/yc_key.json; then
+            echo "✅ Приватный ключ обнаружен в секрете"
           else
-            echo "❌ jq: INVALID JSON"
-            echo "Error:"
-            jq . /tmp/secret-content.txt 2>&1 | head -10
+            echo "❌ Приватный ключ НЕ найден в секрете"
           fi
-      
-      - name: Hex dump for invisible characters
+
+      - name: Test Yandex Cloud Authentication
+        if: success()  # Запускается, только если предыдущий шаг успешен
         run: |
-          echo "=== Step 4: Hex dump (invisible characters) ==="
-          hexdump -C /tmp/secret-content.txt | head -20
-      
-      - name: Manual fix instructions
-        if: failure()
-        run: |
-          echo "=== FIX INSTRUCTIONS ==="
-          echo ""
-          echo "1. In GitHub: Settings → Secrets → YC_SA_KEY"
-          echo "2. DELETE everything"
-          echo "3. Paste EXACTLY this (starting with {, ending with }):"
-          echo ""
-          echo '{"id":"aje8nb1o0kij6dvg4tq1","service_account_id":"aje5tkmdv1edog0g029j","created_at":"2025-12-15T11:10:59.123456Z","key_algorithm":"RSA_2048","public_key":"-----BEGIN PUBLIC KEY-----\nMIIBI...\n-----END PUBLIC KEY-----\n","private_key":"-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY-----\n"}'
-          echo ""
-          echo "4. NO extra spaces at beginning or end"
-          echo "5. Click Save"
+          echo "=== Тестирование аутентификации в Yandex Cloud ==="
+          # Сохраняем ключ
+          echo "${{ secrets.YC_SA_KEY }}" > /tmp/sa_key.json
+          # Устанавливаем yc (менеджер Yandex Cloud CLI)
+          curl -s https://storage.yandexcloud.net/yandexcloud-yc/install.sh | \
+            bash -s -- -i /tmp/yc-temp -n
+          export PATH="/tmp/yc-temp/bin:$PATH"
+          # Пробуем аутентифицироваться
+          if yc config set service-account-key /tmp/sa_key.json && \
+             yc config set cloud-id b1gm0hnoge59gnkmh3dl && \
+             yc config set folder-id b1gm0hnoge59gnkmh3dl; then
+            echo "✅ Конфигурация yc успешна"
+            # Пробуем выполнить простую команду
+            if yc iam service-account get aje5tkmdv1edog0g029j 2>&1 | grep -q "aje5tkmdv1edog0g029j"; then
+              echo "✅ Аутентификация и доступ к API успешны!"
+            else
+              echo "❌ Ошибка доступа к API"
+              yc iam service-account get aje5tkmdv1edog0g029j 2>&1 | head -5
+            fi
+          else
+            echo "❌ Ошибка конфигурации yc"
+          fi
