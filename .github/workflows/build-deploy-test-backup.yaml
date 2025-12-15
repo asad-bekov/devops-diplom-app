@@ -1,0 +1,76 @@
+name: Fixed CI/CD with External IP
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  test-connection:
+    name: Test Kubernetes Connection
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+      
+      - name: Test connection
+        run: |
+          echo "=== Testing Kubernetes API ==="
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          
+          # Проверяем сервер в конфиге
+          echo "Server URL in kubeconfig:"
+          grep "server:" ~/.kube/config
+          
+          # Тестируем подключение (с таймаутом)
+          timeout 30 kubectl cluster-info || echo "Connection timeout, but continuing..."
+          kubectl get nodes
+  
+  build-and-deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    needs: test-connection
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Setup Docker
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Configure Yandex Cloud
+        run: |
+          # Устанавливаем yc
+          curl -s https://storage.yandexcloud.net/yandexcloud-yc/install.sh | \
+            bash -s -- -i /tmp/yc -n
+          
+          # Настраиваем аутентификацию
+          echo "${{ secrets.YC_SA_KEY }}" > /tmp/sa-key.json
+          /tmp/yc/bin/yc config set service-account-key /tmp/sa-key.json
+          /tmp/yc/bin/yc config set cloud-id b1gm0hnoge59gnkmh3dl
+          /tmp/yc/bin/yc config set folder-id b1gm0hnoge59gnkmh3dl
+          /tmp/yc/bin/yc container registry configure-docker
+      
+      - name: Build and Push
+        run: |
+          export PATH="/tmp/yc/bin:$PATH"
+          
+          docker build -t cr.yandex/crplsrum4vurc408russ/diploma-app:${{ github.sha }} .
+          docker push cr.yandex/crplsrum4vurc408russ/diploma-app:${{ github.sha }}
+          docker tag cr.yandex/crplsrum4vurc408russ/diploma-app:${{ github.sha }} cr.yandex/crplsrum4vurc408russ/diploma-app:latest
+          docker push cr.yandex/crplsrum4vurc408russ/diploma-app:latest
+      
+      - name: Deploy
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          
+          kubectl set image deployment/diploma-app \
+            nginx=cr.yandex/crplsrum4vurc408russ/diploma-app:${{ github.sha }} \
+            -n default
+          
+          kubectl rollout status deployment/diploma-app -n default
+          
+          echo "✅ Deployment successful!"
+          echo "Access: http://178.154.230.79:30080"
