@@ -27,9 +27,8 @@ jobs:
         env:
           YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
         run: |
-          curl -s https://storage.yandexcloud.net/yandexcloud-yc/install.sh | \
-            bash -s -- -i /tmp/yc -n
-		  echo "/tmp/yc/bin" >> $GITHUB_PATH
+          curl -s https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i /tmp/yc -n
+          echo "/tmp/yc/bin" >> $GITHUB_PATH
           
           echo "$YC_SA_KEY" > /tmp/sa-key.json
           yc config set service-account-key /tmp/sa-key.json
