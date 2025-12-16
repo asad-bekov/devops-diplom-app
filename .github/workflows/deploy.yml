@@ -3,7 +3,7 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]
+    tags: [ "v*" ]
 
 env:
   REGISTRY: cr.yandex/crplsrum4vurc408russ
@@ -11,207 +11,51 @@ env:
   K8S_NAMESPACE: cicd
 
 jobs:
-  build-and-push:
+  build:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-    
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
-    
-    - name: Login to Yandex Container Registry
-      uses: docker/login-action@v2
-      with:
-        registry: cr.yandex
-        username: json_key
-        password: ${{ secrets.YC_SA_KEY }}
-    
-    - name: Extract metadata for Docker tags
-      id: meta
-      uses: docker/metadata-action@v4
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        tags: |
-          type=ref,event=branch
-          type=ref,event=tag
-          type=sha
-    
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v4
-      with:
-        context: .
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        build-args: |
-          GIT_SHA=${{ github.sha }}
-          DEPLOY_METHOD=github-actions
-          REGISTRY=${{ env.REGISTRY }}
-          ENVIRONMENT=production
-        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-        cache-to: type=inline
+      - uses: actions/checkout@v3
 
-  deploy-to-k8s:
-    needs: build-and-push
+      - name: Login to Yandex Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: cr.yandex
+          username: json_key
+          password: ${{ secrets.YC_SA_KEY }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v4
+        with:
+          context: devops-diplom-app
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+
+  deploy:
+    needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-    
-    - name: Setup kubectl
-      uses: azure/setup-kubectl@v3
-    
-    - name: Configure Kubernetes access
-      env:
-        KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
-      run: |
-        mkdir -p ~/.kube
-        echo "$KUBE_CONFIG_DATA" | base64 --decode > ~/.kube/config
-        chmod 600 ~/.kube/config
-        
-        # Verify connection - skip node listing if forbidden
-        kubectl cluster-info || true
-        echo "✅ Kubernetes API is accessible"
-        
-        # Test namespace access instead
-        kubectl get ns ${{ env.K8S_NAMESPACE }} || kubectl create ns ${{ env.K8S_NAMESPACE }}
-    
-    - name: Prepare deployment manifests
-      run: |
-        # Determine image tag
-        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-          IMAGE_TAG="${{ github.ref_name }}"
-          DEPLOYMENT_NAME="${{ env.IMAGE_NAME }}-${{ github.ref_name }}"
-        else
-          IMAGE_TAG="${{ github.sha }}"
-          DEPLOYMENT_NAME="${{ env.IMAGE_NAME }}-latest"
-        fi
-        
-        echo "Deploying: $DEPLOYMENT_NAME with tag: $IMAGE_TAG"
-        
-        # Create registry secret
-        cat <<EOT > registry-secret.yaml
-        apiVersion: v1
-        kind: Secret
-        metadata:
-          name: yc-registry-secret
-          namespace: ${{ env.K8S_NAMESPACE }}
-        type: kubernetes.io/dockerconfigjson
-        data:
-          .dockerconfigjson: $(echo -n '{"auths":{"cr.yandex":{"auth":"'$(echo -n "json_key:${{ secrets.YC_SA_KEY }}" | base64 -w0)'","email":"none"}}}' | base64 -w0)
-        EOT
-        
-        # Create deployment with environment variables
-        cat <<EOT > deployment.yaml
-        apiVersion: apps/v1
-        kind: Deployment
-        metadata:
-          name: $DEPLOYMENT_NAME
-          namespace: ${{ env.K8S_NAMESPACE }}
-          labels:
-            app: ${{ env.IMAGE_NAME }}
-            version: $IMAGE_TAG
-        spec:
-          replicas: 2
-          selector:
-            matchLabels:
-              app: ${{ env.IMAGE_NAME }}
-          template:
-            metadata:
-              labels:
-                app: ${{ env.IMAGE_NAME }}
-            spec:
-              containers:
-              - name: app
-                image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG
-                imagePullPolicy: Always
-                ports:
-                - containerPort: 80
-                env:
-                - name: GIT_SHA
-                  value: "$IMAGE_TAG"
-                - name: DEPLOY_METHOD
-                  value: "github-actions"
-                - name: REGISTRY
-                  value: "${{ env.REGISTRY }}"
-                - name: ENVIRONMENT
-                  value: "production"
-                resources:
-                  requests:
-                    memory: "64Mi"
-                    cpu: "100m"
-                  limits:
-                    memory: "128Mi"
-                    cpu: "200m"
-                readinessProbe:
-                  httpGet:
-                    path: /health
-                    port: 80
-                  initialDelaySeconds: 5
-                  periodSeconds: 5
-                livenessProbe:
-                  httpGet:
-                    path: /health
-                    port: 80
-                  initialDelaySeconds: 15
-                  periodSeconds: 20
-              imagePullSecrets:
-              - name: yc-registry-secret
-        EOT
-        
-        # Create service
-        cat <<EOT > service.yaml
-        apiVersion: v1
-        kind: Service
-        metadata:
-          name: ${{ env.IMAGE_NAME }}-service
-          namespace: ${{ env.K8S_NAMESPACE }}
-        spec:
-          type: NodePort
-          selector:
-            app: ${{ env.IMAGE_NAME }}
-          ports:
-          - port: 80
-            targetPort: 80
-            nodePort: 30080
-        EOT
-        
-        echo "=== Generated manifests ==="
-        cat registry-secret.yaml | head -5
-        echo "..."
-        cat deployment.yaml | head -30
-        echo "..."
-        cat service.yaml
-    
-    - name: Apply Kubernetes manifests
-      run: |
-        # Apply secrets and manifests
-        kubectl apply -f registry-secret.yaml
-        kubectl apply -f deployment.yaml
-        kubectl apply -f service.yaml
-        
-        # Wait for rollout
-        kubectl rollout status deployment/$DEPLOYMENT_NAME -n ${{ env.K8S_NAMESPACE }} --timeout=300s
-        
-        # Show status
-        echo "=== Deployment Status ==="
-        kubectl get deployments -n ${{ env.K8S_NAMESPACE }}
-        
-        echo "=== Pods Status ==="
-        kubectl get pods -n ${{ env.K8S_NAMESPACE }} -o wide
-        
-        echo "=== Service Status ==="
-        kubectl get svc -n ${{ env.K8S_NAMESPACE }}
-        
-        echo "=== Access Information ==="
-        echo "Application is accessible at:"
-        echo "  Master node: http://158.160.48.179:30080"
-        echo "  Worker 1:    http://178.154.207.161:30080"
-        echo "  Worker 2:    http://158.160.10.201:30080"
-        echo ""
-        echo "Health check:"
-        echo "  curl http://158.160.48.179:30080/health"
+      - uses: actions/checkout@v3
+
+      - uses: azure/setup-kubectl@v3
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG_DATA }}" | base64 -d > ~/.kube/config
+
+      - name: Deploy to Kubernetes (Rolling Update)
+        env:
+          YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+
+          DOCKER_CONFIG_JSON=$(echo -n "{\"auths\":{\"cr.yandex\":{\"auth\":\"$(echo -n "json_key:$YC_SA_KEY" | base64 -w0)\"}}}" | base64 -w0)
+          sed "s|{{DOCKER_CONFIG_JSON}}|$DOCKER_CONFIG_JSON|" k8s/registry-secret.yaml | kubectl apply -f -
+
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name || 'main' }}"
+          sed -e "s|{{IMAGE}}|$IMAGE|" -e "s|{{IMAGE_TAG}}|${GITHUB_SHA::7}|" k8s/deployment.yaml | kubectl apply -f -
+
+          kubectl apply -f k8s/service.yaml
+          kubectl rollout status deployment/devops-diplom-app -n cicd
