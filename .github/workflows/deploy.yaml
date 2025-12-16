@@ -29,7 +29,6 @@ jobs:
         run: |
           curl -s https://storage.yandexcloud.net/yandexcloud-yc/install.sh | \
             bash -s -- -i /tmp/yc -n
-          export PATH="/tmp/yc/bin:$PATH"
 		  echo "/tmp/yc/bin" >> $GITHUB_PATH
           
           echo "$YC_SA_KEY" > /tmp/sa-key.json
