@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DevOps Diploma App</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .header { background: #f0f0f0; padding: 20px; border-radius: 5px; }
+        .status { color: green; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>DevOps Diploma Application</h1>
+            <p>Yandex Cloud | Kubernetes | GitHub Actions CI/CD</p>
+        </div>
+        
+        <h2>Application Status: <span class="status">Running</span></h2>
+        
+        <h3>System Information:</h3>
+        <ul>
+            <li>Build: ${{ github.sha }}</li>
+            <li>Deployed via: GitHub Actions</li>
+            <li>Cluster: Self-hosted Kubernetes</li>
+            <li>Cloud: Yandex Cloud</li>
+        </ul>
+        
+        <h3>Technologies:</h3>
+        <ul>
+            <li>Terraform for infrastructure</li>
+            <li>Kubernetes for orchestration</li>
+            <li>Prometheus & Grafana for monitoring</li>
+            <li>GitHub Actions for CI/CD</li>
+        </ul>
+        
+        <p><em>This is a test application for DevOps diploma project.</em></p>
+    </div>
+</body>
+</html>

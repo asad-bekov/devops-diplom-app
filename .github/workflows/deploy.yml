@@ -1,0 +1,197 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: cr.yandex/crplsrum4vurc408russ
+  IMAGE_NAME: devops-diplom-app
+  K8S_NAMESPACE: cicd
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Login to Yandex Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: cr.yandex
+        username: json_key
+        password: ${{ secrets.YC_SA_KEY }}
+    
+    - name: Extract metadata for Docker tags
+      id: meta
+      uses: docker/metadata-action@v4
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=sha,prefix=sha-
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy-on-tag:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+    
+    - name: Configure Kubernetes
+      env:
+        KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+      run: |
+        mkdir -p ~/.kube
+        echo "$KUBE_CONFIG_DATA" | base64 --decode > ~/.kube/config
+        chmod 600 ~/.kube/config
+        
+        echo "Kubernetes connection established"
+        kubectl cluster-info
+    
+    - name: Get tag version
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+    
+    - name: Deploy tagged version
+      env:
+        TAG: ${{ steps.get_version.outputs.VERSION }}
+      run: |
+        echo "Deploying version: $TAG"
+        
+        # Create deployment for tagged version
+        cat <<EOT > deployment.yaml
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${{ env.IMAGE_NAME }}-${{ env.TAG }}
+          namespace: ${{ env.K8S_NAMESPACE }}
+          labels:
+            app: ${{ env.IMAGE_NAME }}
+            version: ${{ env.TAG }}
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app: ${{ env.IMAGE_NAME }}
+              version: ${{ env.TAG }}
+          template:
+            metadata:
+              labels:
+                app: ${{ env.IMAGE_NAME }}
+                version: ${{ env.TAG }}
+            spec:
+              containers:
+              - name: app
+                image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
+                imagePullPolicy: Always
+                ports:
+                - containerPort: 80
+                resources:
+                  requests:
+                    memory: "64Mi"
+                    cpu: "100m"
+                  limits:
+                    memory: "128Mi"
+                    cpu: "200m"
+              imagePullSecrets:
+              - name: yc-registry-secret
+        EOT
+        
+        kubectl apply -f deployment.yaml
+        kubectl rollout status deployment/${{ env.IMAGE_NAME }}-${{ env.TAG }} -n ${{ env.K8S_NAMESPACE }}
+
+  deploy-on-main:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+    
+    - name: Configure Kubernetes
+      env:
+        KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+      run: |
+        mkdir -p ~/.kube
+        echo "$KUBE_CONFIG_DATA" | base64 --decode > ~/.kube/config
+        chmod 600 ~/.kube/config
+        
+        echo "Kubernetes connection established"
+        kubectl cluster-info
+    
+    - name: Deploy latest from main
+      run: |
+        # Create/update deployment
+        cat <<EOT > deployment.yaml
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${{ env.IMAGE_NAME }}-latest
+          namespace: ${{ env.K8S_NAMESPACE }}
+          labels:
+            app: ${{ env.IMAGE_NAME }}
+            branch: main
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app: ${{ env.IMAGE_NAME }}
+              branch: main
+          template:
+            metadata:
+              labels:
+                app: ${{ env.IMAGE_NAME }}
+                branch: main
+            spec:
+              containers:
+              - name: app
+                image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+                imagePullPolicy: Always
+                ports:
+                - containerPort: 80
+                resources:
+                  requests:
+                    memory: "64Mi"
+                    cpu: "100m"
+                  limits:
+                    memory: "128Mi"
+                    cpu: "200m"
+              imagePullSecrets:
+              - name: yc-registry-secret
+        EOT
+        
+        kubectl apply -f deployment.yaml
+        kubectl rollout status deployment/${{ env.IMAGE_NAME }}-latest -n ${{ env.K8S_NAMESPACE }}
+        
+        # Show status
+        kubectl get all -n ${{ env.K8S_NAMESPACE }}
