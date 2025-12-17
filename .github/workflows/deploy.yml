@@ -44,7 +44,13 @@ jobs:
           echo "${{ secrets.KUBE_CONFIG_DATA }}" | base64 --decode > kubeconfig
           echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
 
+      - name: Debug paths
+        run: |
+          pwd
+          ls -la
+          ls -la manifests/
+
       - name: Deploy to Kubernetes (Rolling Update)
         run: |
-          kubectl apply -f devops-diplom-app/manifests/
+          kubectl apply -f manifests/
           kubectl rollout status deployment/devops-diplom-app -n cicd
