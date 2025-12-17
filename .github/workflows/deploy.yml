@@ -3,7 +3,7 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [ main ]
-    tags: [ "v*" ]
+    tags: [ 'v*' ]
 
 env:
   REGISTRY: cr.yandex/crplsrum4vurc408russ
@@ -11,10 +11,15 @@ env:
   K8S_NAMESPACE: cicd
 
 jobs:
+# =========================
+# BUILD & PUSH IMAGE
+# =========================
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Login to Yandex Container Registry
         uses: docker/login-action@v2
@@ -23,39 +28,151 @@ jobs:
           username: json_key
           password: ${{ secrets.YC_SA_KEY }}
 
-      - name: Build & Push
+      - name: Set image tag
+        id: vars
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          else
+            echo "IMAGE_TAG=main" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
-          context: devops-diplom-app
+          context: .
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.IMAGE_TAG }}
 
+# =========================
+# DEPLOY TO KUBERNETES
+# =========================
   deploy:
-    needs: build
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
 
-      - uses: azure/setup-kubectl@v3
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
 
       - name: Configure kubeconfig
         run: |
           mkdir -p ~/.kube
           echo "${{ secrets.KUBE_CONFIG_DATA }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl cluster-info
 
-      - name: Deploy to Kubernetes (Rolling Update)
+      - name: Set image tag
+        id: vars
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          else
+            echo "IMAGE_TAG=main" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create namespace
+        run: |
+          kubectl create namespace ${{ env.K8S_NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create registry secret
         env:
           YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
         run: |
-          kubectl apply -f k8s/namespace.yaml
+          kubectl create secret docker-registry yc-registry-secret \
+            --docker-server=cr.yandex \
+            --docker-username=json_key \
+            --docker-password="$YC_SA_KEY" \
+            --namespace=${{ env.K8S_NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
 
-          DOCKER_CONFIG_JSON=$(echo -n "{\"auths\":{\"cr.yandex\":{\"auth\":\"$(echo -n "json_key:$YC_SA_KEY" | base64 -w0)\"}}}" | base64 -w0)
-          sed "s|{{DOCKER_CONFIG_JSON}}|$DOCKER_CONFIG_JSON|" k8s/registry-secret.yaml | kubectl apply -f -
+      - name: Deploy application (Rolling Update)
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.IMAGE_TAG }}
+        run: |
+          cat <<EOF > deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${IMAGE_NAME}
+  namespace: ${K8S_NAMESPACE}
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: ${IMAGE_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${IMAGE_NAME}
+    spec:
+      imagePullSecrets:
+        - name: yc-registry-secret
+      containers:
+        - name: app
+          image: ${IMAGE}
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 15
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+EOF
 
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name || 'main' }}"
-          sed -e "s|{{IMAGE}}|$IMAGE|" -e "s|{{IMAGE_TAG}}|${GITHUB_SHA::7}|" k8s/deployment.yaml | kubectl apply -f -
+          kubectl apply -f deployment.yaml
+          kubectl rollout status deployment/${IMAGE_NAME} -n ${K8S_NAMESPACE} --timeout=300s
 
-          kubectl apply -f k8s/service.yaml
-          kubectl rollout status deployment/devops-diplom-app -n cicd
+      - name: Apply service
+        run: |
+          cat <<EOF > service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${IMAGE_NAME}
+  namespace: ${K8S_NAMESPACE}
+spec:
+  type: NodePort
+  selector:
+    app: ${IMAGE_NAME}
+  ports:
+    - port: 80
+      targetPort: 80
+EOF
+
+          kubectl apply -f service.yaml
+
+      - name: Show result
+        run: |
+          echo "=== DEPLOYMENT ==="
+          kubectl get deploy -n ${K8S_NAMESPACE}
+          echo ""
+          echo "=== PODS ==="
+          kubectl get pods -n ${K8S_NAMESPACE}
+          echo ""
+          echo "=== SERVICE ==="
+          kubectl get svc -n ${K8S_NAMESPACE}
