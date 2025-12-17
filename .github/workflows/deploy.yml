@@ -105,7 +105,7 @@ spec:
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.IMAGE_TAG }}
           ports:
             - containerPort: 80
-EOF
+          EOF
           kubectl apply -f deployment.yaml
           kubectl rollout status deployment/devops-diplom-app -n ${{ env.K8S_NAMESPACE }}
 
@@ -124,5 +124,5 @@ spec:
   ports:
     - port: 80
       targetPort: 80
-EOF
+          EOF
           kubectl apply -f service.yaml
