@@ -26,24 +26,10 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              echo "Starting app container";
-              if [ -f /app/app ]; then
-                exec /app/app;
-              else
-                exec python3 -m http.server 8080;
-              fi
+              echo "CI/CD test container started";
+              sleep infinity
           ports:
             - containerPort: 8080
-          readinessProbe:
-            tcpSocket:
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 5
-          livenessProbe:
-            tcpSocket:
-              port: 8080
-            initialDelaySeconds: 15
-            periodSeconds: 10
           resources:
             requests:
               cpu: "100m"
