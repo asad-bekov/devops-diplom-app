@@ -21,6 +21,9 @@ spec:
     spec:
       containers:
         - name: app
+          # Placeholder image — real image is set via CI/CD
+          image: cr.yandex/crplsrum4vurc408russ/devops-diplom-app:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           readinessProbe:
