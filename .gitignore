@@ -139,3 +139,23 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 *.json
 kubeconfig*
+
+# secrets / keys
+*.json
+sa-key.json
+key.json
+key-full.json
+github-sa-key.json
+github-sa-token.txt
+
+# kubeconfig
+kubeconfig*.yaml
+* kubeconfig *
+kubeconfig-base64.txt
+new-kubeconfig.yaml
+
+# local temp
+*.log
+*.tmp
+.DS_Store
+manifests/registry-secret.yaml

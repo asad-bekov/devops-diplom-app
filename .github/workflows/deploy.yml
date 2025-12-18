@@ -9,48 +9,82 @@ env:
   REGISTRY: cr.yandex/crplsrum4vurc408russ
   IMAGE_NAME: devops-diplom-app
   K8S_NAMESPACE: cicd
+  DEPLOYMENT_NAME: devops-diplom-app
+  CONTAINER_NAME: app
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${GITHUB_SHA}"
+          fi
+          echo "image=${REGISTRY}/${IMAGE_NAME}:${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Login to Yandex Container Registry
+        shell: bash
         run: |
           echo '${{ secrets.YC_SA_KEY }}' | docker login cr.yandex -u json_key --password-stdin
 
       - name: Build & Push image
+        shell: bash
         run: |
-          TAG=${{ github.sha }}
-          docker build -t $REGISTRY/$IMAGE_NAME:$TAG .
-          docker push $REGISTRY/$IMAGE_NAME:$TAG
+          IMAGE="${{ steps.vars.outputs.image }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
 
-          docker tag $REGISTRY/$IMAGE_NAME:$TAG $REGISTRY/$IMAGE_NAME:latest
-          docker push $REGISTRY/$IMAGE_NAME:latest
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            docker tag "$IMAGE" "${REGISTRY}/${IMAGE_NAME}:latest"
+            docker push "${REGISTRY}/${IMAGE_NAME}:latest"
+          fi
 
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: build
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: azure/setup-kubectl@v3
-
-      - name: Configure kubeconfig
+      - name: Use kubeconfig on runner host
+        shell: bash
         run: |
-          echo "${{ secrets.KUBE_CONFIG_DATA }}" | base64 --decode > kubeconfig
-          echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
+          echo "KUBECONFIG=$HOME/actions-runner/kubeconfig" >> $GITHUB_ENV
+          kubectl version --client=true
+          kubectl cluster-info
 
-      - name: Debug paths
+      - name: Ensure namespace exists
+        shell: bash
         run: |
-          pwd
-          ls -la
-          ls -la manifests/
+          kubectl create namespace "${K8S_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Deploy to Kubernetes (Rolling Update)
+      - name: Apply base manifests (service/ingress)
+        shell: bash
         run: |
-          kubectl apply -f manifests/
-          kubectl rollout status deployment/devops-diplom-app -n cicd
+          kubectl apply -n "${K8S_NAMESPACE}" -f manifests/service.yaml
+          kubectl apply -n "${K8S_NAMESPACE}" -f manifests/ingress.yaml
+
+      - name: Rolling update (set image)
+        shell: bash
+        run: |
+          IMAGE="${{ needs.build.outputs.image }}"
+
+          # Ensure Deployment exists
+          kubectl apply -n "${K8S_NAMESPACE}" -f manifests/deployment.yaml
+
+          # Rolling update without recreating Deployment
+          kubectl set image -n "${K8S_NAMESPACE}" deployment/"${DEPLOYMENT_NAME}" \
+            "${CONTAINER_NAME}"="$IMAGE" --record
+
+          kubectl rollout status -n "${K8S_NAMESPACE}" deployment/"${DEPLOYMENT_NAME}" --timeout=300s
+          kubectl get pods -n "${K8S_NAMESPACE}" -o wide
