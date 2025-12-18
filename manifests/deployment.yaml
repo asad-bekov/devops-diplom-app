@@ -3,10 +3,9 @@ kind: Deployment
 metadata:
   name: devops-diplom-app
   namespace: cicd
-  labels:
-    app: devops-diplom-app
 spec:
   replicas: 2
+  revisionHistoryLimit: 5
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -20,11 +19,26 @@ spec:
       labels:
         app: devops-diplom-app
     spec:
-      imagePullSecrets:
-        - name: yc-registry-secret
       containers:
         - name: app
-          image: cr.yandex/crplsrum4vurc408russ/devops-diplom-app:latest
-          imagePullPolicy: Always
           ports:
-            - containerPort: 80
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
