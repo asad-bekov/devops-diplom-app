@@ -61,30 +61,20 @@ jobs:
         run: |
           echo "KUBECONFIG=$HOME/actions-runner/kubeconfig" >> $GITHUB_ENV
           kubectl version --client=true
-          kubectl cluster-info
 
-      - name: Ensure namespace exists
-        shell: bash
-        run: |
-          kubectl create namespace "${K8S_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-
-      - name: Apply base manifests (service/ingress)
-        shell: bash
-        run: |
-          kubectl apply -n "${K8S_NAMESPACE}" -f manifests/service.yaml
-          kubectl apply -n "${K8S_NAMESPACE}" -f manifests/ingress.yaml
-
-      - name: Rolling update (set image)
+      - name: Deploy (namespace-scoped)
         shell: bash
         run: |
           IMAGE="${{ needs.build.outputs.image }}"
 
-          # Ensure Deployment exists
+          # Apply manifests inside namespace only
+          kubectl apply -n "${K8S_NAMESPACE}" -f manifests/service.yaml
+          kubectl apply -n "${K8S_NAMESPACE}" -f manifests/ingress.yaml
           kubectl apply -n "${K8S_NAMESPACE}" -f manifests/deployment.yaml
 
           # Rolling update without recreating Deployment
           kubectl set image -n "${K8S_NAMESPACE}" deployment/"${DEPLOYMENT_NAME}" \
-            "${CONTAINER_NAME}"="$IMAGE" --record
+            "${CONTAINER_NAME}"="$IMAGE"
 
           kubectl rollout status -n "${K8S_NAMESPACE}" deployment/"${DEPLOYMENT_NAME}" --timeout=300s
           kubectl get pods -n "${K8S_NAMESPACE}" -o wide
