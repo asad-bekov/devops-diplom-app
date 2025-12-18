@@ -23,6 +23,15 @@ spec:
         - name: app
           image: cr.yandex/crplsrum4vurc408russ/devops-diplom-app:latest
           imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "Starting app container";
+              if [ -f /app/app ]; then
+                exec /app/app;
+              else
+                exec python3 -m http.server 8080;
+              fi
           ports:
             - containerPort: 8080
           readinessProbe:
