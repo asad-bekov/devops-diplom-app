@@ -219,7 +219,7 @@ kubectl get secret -n monitoring kube-prometheus-stack-grafana \
 
 Service и Ingress, используемые для доступа к приложению.
 
-![Service and Ingress](screenshots/02-application/02-app-service-ingress.png)
+![Service and Ingress](screenshots/02-application/02-ingress-nginx-services.png)
 
 Проверка используемого Docker-образа в Deployment.
 
