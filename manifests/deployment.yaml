@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: cr.yandex/crplsrum4vurc408russ/devops-diplom-app:latest
+          image: dummy
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-c"]
           args:
